@@ -2,6 +2,7 @@ from general_motion_retargeting import RobotMotionViewer, load_robot_motion
 import argparse
 import os
 from tqdm import tqdm
+import numpy as np
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
@@ -22,6 +23,9 @@ if __name__ == "__main__":
         raise FileNotFoundError(f"Motion file {robot_motion_path} not found")
     
     motion_data, motion_fps, motion_root_pos, motion_root_rot, motion_dof_pos, motion_local_body_pos, motion_link_body_list = load_robot_motion(robot_motion_path)
+    #motion_root_pos = np.zeros_like(motion_root_pos)    # or np.zeros((120, 3))
+    motion_root_pos[:, 2] = 0.5   # set z to 0.3m to avoid ground penetration
+    motion_root_rot = np.tile([0, 0, 0, 1], (120, 1))   # w-last: [x, y, z, w]
     
     env = RobotMotionViewer(robot_type=robot_type,
                             motion_fps=motion_fps,
