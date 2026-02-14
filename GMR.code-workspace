@@ -1,0 +1,16 @@
+{
+	"folders": [
+		{
+			"path": "."
+		},
+		{
+			"path": "../../../media/haziq/Haziq/vitra"
+		},
+		{
+			"path": "../../../media/haziq/Haziq/motionx"
+		}
+	],
+	"settings": {
+		"git.ignoreLimitWarning": true
+	}
+}
