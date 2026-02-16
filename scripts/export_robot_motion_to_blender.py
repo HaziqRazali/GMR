@@ -69,6 +69,24 @@ def export_to_fbx(motion_file, robot_type, output_path):
     
     print(f"\nJoint names: {joint_names}")
     
+    # Coordinate system correction for Blender
+    # MuJoCo Z-up to Blender Z-up with correct orientation (rotate 90° around X-axis)
+    correction_rot = R.from_euler('x', 90, degrees=True)
+    
+    # Get initial pelvis height to calculate ground offset
+    data.qpos[:3] = root_pos[0]
+    quat_xyzw = root_rot[0]
+    data.qpos[3:7] = [quat_xyzw[3], quat_xyzw[0], quat_xyzw[1], quat_xyzw[2]]
+    if dof_pos.shape[1] == model.nv - 6:
+        data.qpos[7:] = dof_pos[0]
+    else:
+        data.qpos[7:7+dof_pos.shape[1]] = dof_pos[0]
+    mj.mj_forward(model, data)
+    initial_pelvis_z = data.xpos[1].copy()[2]  # Body 1 is typically pelvis
+    
+    print(f"Initial pelvis height: {initial_pelvis_z:.3f}")
+    print("Applying coordinate transform for Blender...")
+    
     # For each frame, store the complete pose
     for frame_idx in range(num_frames):
         # Set the pose in MuJoCo
@@ -101,12 +119,22 @@ def export_to_fbx(motion_file, robot_type, output_path):
             if body_name:
                 body_pos = data.xpos[body_id].copy()
                 body_quat = data.xquat[body_id].copy()  # wxyz in MuJoCo
-                # Convert to xyzw for consistency
+                
+                # Apply coordinate transform for Blender
+                # Rotate position
+                body_pos_transformed = correction_rot.apply(body_pos)
+                # Adjust height to put on ground
+                body_pos_transformed[2] -= initial_pelvis_z
+                
+                # Convert quaternion wxyz to xyzw, then apply rotation correction
                 body_quat_xyzw = [body_quat[1], body_quat[2], body_quat[3], body_quat[0]]
+                body_rot = R.from_quat(body_quat_xyzw)  # scipy uses xyzw
+                body_rot_transformed = correction_rot * body_rot
+                body_quat_xyzw_transformed = body_rot_transformed.as_quat()  # xyzw
                 
                 frame_data['body_poses'][body_name] = {
-                    'position': body_pos.tolist(),
-                    'rotation': body_quat_xyzw  # xyzw format
+                    'position': body_pos_transformed.tolist(),
+                    'rotation': body_quat_xyzw_transformed.tolist()  # xyzw format
                 }
         
         animation_data['frames'].append(frame_data)
