@@ -40,7 +40,7 @@ def import_animation_with_rotation(animation_json_path):
         empty.name = body_name
         # CRITICAL: Set rotation mode to QUATERNION before any keyframing
         empty.rotation_mode = 'QUATERNION'
-        empty.show_name = True
+        empty.show_name = False  # Don't show names by default
         empties[body_name] = empty
     
     print(f"Created {len(empties)} empties with QUATERNION rotation mode")
