@@ -82,9 +82,18 @@ def export_to_fbx(motion_file, robot_type, output_path):
     else:
         data.qpos[7:7+dof_pos.shape[1]] = dof_pos[0]
     mj.mj_forward(model, data)
-    initial_pelvis_z = data.xpos[1].copy()[2]  # Body 1 is typically pelvis
     
-    print(f"Initial pelvis height: {initial_pelvis_z:.3f}")
+    # Find the lowest body point (feet) to put on ground
+    min_z = float('inf')
+    for body_id in range(model.nbody):
+        body_pos = data.xpos[body_id].copy()
+        body_pos_transformed = correction_rot.apply(body_pos)
+        if body_pos_transformed[2] < min_z:
+            min_z = body_pos_transformed[2]
+    
+    ground_offset = min_z  # Subtract this to put lowest point at Z=0
+    
+    print(f"Ground offset (lowest point): {ground_offset:.3f}")
     print("Applying coordinate transform for Blender...")
     
     # For each frame, store the complete pose
@@ -123,8 +132,8 @@ def export_to_fbx(motion_file, robot_type, output_path):
                 # Apply coordinate transform for Blender
                 # Rotate position
                 body_pos_transformed = correction_rot.apply(body_pos)
-                # Adjust height to put on ground
-                body_pos_transformed[2] -= initial_pelvis_z
+                # Adjust height to put feet on ground
+                body_pos_transformed[2] -= ground_offset
                 
                 # Convert quaternion wxyz to xyzw, then apply rotation correction
                 body_quat_xyzw = [body_quat[1], body_quat[2], body_quat[3], body_quat[0]]
