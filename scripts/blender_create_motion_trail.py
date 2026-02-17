@@ -61,11 +61,18 @@ def create_motion_trail(frame_step=10, start_frame=None, end_frame=None, opacity
             new_obj.data = mesh_obj.data.copy()
             new_obj.name = f"{mesh_obj.name}_frame_{frame_num:04d}"
             
-            # Get world transform at this frame
-            new_obj.matrix_world = mesh_obj.matrix_world.copy()
+            # Add to frame collection first (before removing parent)
+            frame_collection.objects.link(new_obj)
             
-            # Remove parent (make it static)
+            # Store world transform BEFORE clearing parent
+            world_matrix = mesh_obj.matrix_world.copy()
+            
+            # Clear parent while keeping transform
             new_obj.parent = None
+            new_obj.matrix_parent_inverse.identity()
+            
+            # Apply the stored world transform
+            new_obj.matrix_world = world_matrix
             
             # Clear animation
             new_obj.animation_data_clear()
@@ -88,9 +95,6 @@ def create_motion_trail(frame_step=10, start_frame=None, end_frame=None, opacity
                         
                         # Replace material
                         new_obj.data.materials[0] = mat
-            
-            # Add to frame collection
-            frame_collection.objects.link(new_obj)
         
         if (idx + 1) % 5 == 0:
             print(f"  Created ghost robot {idx + 1}/{total_frames} (frame {frame_num})")
