@@ -3,8 +3,8 @@
 python scripts/smplx_to_robot.py --smplx_file /home/haziq/datasets/mocap/data/humaneva/train/S1/smplx/Jog_1.npz --robot unitree_g1 --save_path motion.npz --rate_limit
 
 ####################
-python scripts/smplx_to_robot_v2.py idx=47 result_foldername="/home/haziq/Collab_AI/results/AAAI2026/2024_11_18/gimo/obj2pose/cvae=all_v2_transl=mse_orient=mse_pred_all_objects_dtype=train_mib/" obj_idx=1 rep_idx=0 --robot unitree_g1 --save_path motion.npz --rate_limit
-python scripts/export_robot_motion_to_blender.py --motion_file motion.npz --robot unitree_g1 --output blender_export/robot_motion.fbx
+python scripts/smplx_to_robot_v2.py idx=47 result_foldername="/home/haziq/Collab_AI/results/AAAI2026/2024_11_18/gimo/obj2pose/cvae=all_v2_transl=mse_orient=mse_pred_all_objects_dtype=train_mib/" obj_idx=1 rep_idx=0 --robot unitree_g1 --save_path objidx1_repidx0.npz --rate_limit
+python scripts/export_robot_motion_to_blender.py --motion_file objidx1_repidx0.npz --robot unitree_g1 --output blender_export/objidx1_repidx0/robot_motion.fbx
 
 #################### global motion - single file
 python scripts/smplx_to_robot_json.py \
