@@ -7,7 +7,8 @@ Run this AFTER importing animation and parenting meshes.
 
 import bpy
 
-def create_motion_trail(frame_step=10, start_frame=None, end_frame=None, opacity=0.5, frames=None):
+def create_motion_trail(frame_step=10, start_frame=None, end_frame=None, opacity=0.5, frames=None, 
+                        collection_name=None, only_parented=True):
     """
     Create static robot copies at different timesteps.
     
@@ -17,6 +18,8 @@ def create_motion_trail(frame_step=10, start_frame=None, end_frame=None, opacity
         end_frame: Last frame to copy (None = scene end)
         opacity: Transparency for ghost robots (0=invisible, 1=opaque)
         frames: Optional explicit iterable of frame indices to use (overrides frame_step/start/end).
+        collection_name: Only duplicate meshes from this collection (None = all collections)
+        only_parented: Only duplicate meshes with parents (True = ignore standalone objects)
     """
     print("="*60)
     print("Creating Motion Trail (Ghost Frames)")
@@ -29,13 +32,31 @@ def create_motion_trail(frame_step=10, start_frame=None, end_frame=None, opacity
         end_frame = bpy.context.scene.frame_end
     
     # Get all meshes (robot parts)
-    original_meshes = [obj for obj in bpy.data.objects if obj.type == 'MESH']
+    if collection_name:
+        # Filter by collection
+        if collection_name not in bpy.data.collections:
+            print(f"❌ Collection '{collection_name}' not found!")
+            return
+        collection = bpy.data.collections[collection_name]
+        original_meshes = [obj for obj in collection.all_objects if obj.type == 'MESH']
+    else:
+        original_meshes = [obj for obj in bpy.data.objects if obj.type == 'MESH']
+    
+    # Filter to only parented meshes (ignore standalone scene objects)
+    if only_parented:
+        original_meshes = [obj for obj in original_meshes if obj.parent is not None]
     
     if not original_meshes:
         print("❌ No meshes found! Import the robot first.")
+        if only_parented:
+            print("   (Hint: only_parented=True, so only meshes with parents are included)")
         return
     
-    print(f"Found {len(original_meshes)} mesh objects")
+    print(f"Found {len(original_meshes)} mesh objects to duplicate")
+    if only_parented:
+        print("  (Only parented meshes - standalone objects ignored)")
+    if collection_name:
+        print(f"  (From collection: {collection_name})")
     print(f"Creating copies from frame {start_frame} to {end_frame}, step={frame_step}")
     
     # Create a collection for each frame
@@ -153,6 +174,10 @@ if __name__ == "__main__":
     # Optionally provide an explicit list of frames instead of step/start/end
     # Example: FRAMES_LIST = [0, 11, 18, 25]
     FRAMES_LIST = None
+    # Optional: only duplicate meshes from a specific collection
+    COLLECTION_NAME = None  # e.g., "Collection" or None for all
+    # Only duplicate parented meshes (ignore standalone scene objects like walls/floor)
+    ONLY_PARENTED = True
     
     # To create motion trail:
     create_motion_trail(
@@ -160,7 +185,9 @@ if __name__ == "__main__":
         start_frame=START_FRAME,
         end_frame=END_FRAME,
         opacity=OPACITY,
-        frames=FRAMES_LIST
+        frames=FRAMES_LIST,
+        collection_name=COLLECTION_NAME,
+        only_parented=ONLY_PARENTED
     )
     
     # To delete motion trail (uncomment):
