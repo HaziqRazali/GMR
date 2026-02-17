@@ -7,7 +7,7 @@ Run this AFTER importing animation and parenting meshes.
 
 import bpy
 
-def create_motion_trail(frame_step=10, start_frame=None, end_frame=None, opacity=0.5):
+def create_motion_trail(frame_step=10, start_frame=None, end_frame=None, opacity=0.5, frames=None):
     """
     Create static robot copies at different timesteps.
     
@@ -16,6 +16,7 @@ def create_motion_trail(frame_step=10, start_frame=None, end_frame=None, opacity
         start_frame: First frame to copy (None = scene start)
         end_frame: Last frame to copy (None = scene end)
         opacity: Transparency for ghost robots (0=invisible, 1=opaque)
+        frames: Optional explicit iterable of frame indices to use (overrides frame_step/start/end).
     """
     print("="*60)
     print("Creating Motion Trail (Ghost Frames)")
@@ -41,7 +42,16 @@ def create_motion_trail(frame_step=10, start_frame=None, end_frame=None, opacity
     trail_collection = bpy.data.collections.new("Motion_Trail")
     bpy.context.scene.collection.children.link(trail_collection)
     
-    frame_list = range(start_frame, end_frame + 1, frame_step)
+    # Build frame list: explicit `frames` takes precedence
+    if frames is not None:
+        # Accept any iterable of ints; coerce to sorted unique list
+        try:
+            frame_list = sorted({int(f) for f in frames})
+        except Exception:
+            print("❌ Invalid `frames` argument. Provide an iterable of integers.")
+            return
+    else:
+        frame_list = list(range(start_frame, end_frame + 1, frame_step))
     total_frames = len(frame_list)
     
     print(f"Will create {total_frames} ghost robots")
@@ -106,8 +116,11 @@ def create_motion_trail(frame_step=10, start_frame=None, end_frame=None, opacity
     print("  - Click eye icon next to Frame_XXXX to hide/show that timestep")
     print("="*60)
     
-    # Reset to start frame
-    bpy.context.scene.frame_set(start_frame)
+    # Reset to first frame in the created list (or scene start)
+    if total_frames > 0:
+        bpy.context.scene.frame_set(frame_list[0])
+    else:
+        bpy.context.scene.frame_set(start_frame)
 
 
 def delete_motion_trail():
@@ -137,13 +150,17 @@ if __name__ == "__main__":
     START_FRAME = None   # None = use scene start
     END_FRAME = None     # None = use scene end
     OPACITY = 0.3        # 0.0 = invisible, 1.0 = fully opaque
+    # Optionally provide an explicit list of frames instead of step/start/end
+    # Example: FRAMES_LIST = [0, 11, 18, 25]
+    FRAMES_LIST = None
     
     # To create motion trail:
     create_motion_trail(
         frame_step=FRAME_STEP,
         start_frame=START_FRAME,
         end_frame=END_FRAME,
-        opacity=OPACITY
+        opacity=OPACITY,
+        frames=FRAMES_LIST
     )
     
     # To delete motion trail (uncomment):
