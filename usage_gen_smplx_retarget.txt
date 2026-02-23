@@ -1,0 +1,2 @@
+cd GMR
+python3 scripts/generate_smplx_retarget.py assets/unitree_g1/g1_custom_collision_29dof.urdf --human-scale 0.9 --arm-scale 0.8 --ground-height 0.0 --no-head -o output4.json
