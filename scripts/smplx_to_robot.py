@@ -4,10 +4,13 @@ import os
 import time
 
 import numpy as np
+import torch
 
 from general_motion_retargeting import GeneralMotionRetargeting as GMR
 from general_motion_retargeting import RobotMotionViewer
 from general_motion_retargeting.utils.smpl import load_smplx_file, get_smplx_data_offline_fast
+from general_motion_retargeting.utils.smpl_json import load_smplx_json_file
+from general_motion_retargeting.utils.smpl_pkl import load_smplx_4dhumans_pkl
 
 from rich import print
 
@@ -64,19 +67,113 @@ if __name__ == "__main__":
         help="Limit the rate of the retargeted robot motion to keep the same as the human motion.",
     )
 
+    parser.add_argument(
+        "--camera_distance",
+        type=float,
+        default=None,
+        help="Camera distance (zoom level). Larger = more zoomed out. Defaults to robot-specific preset.",
+    )
+
+    parser.add_argument(
+        "--camera_elevation",
+        type=float,
+        default=-10,
+        help="Camera elevation angle in degrees (negative = looking down). Default: -10.",
+    )
+
+    parser.add_argument(
+        "--fps",
+        type=int,
+        default=None,
+        help="Input motion FPS (used for JSON files). Fit3D defaults to 50, MotionX defaults to 30.",
+    )
+
+    parser.add_argument(
+        "--rotate_roll",
+        type=float,
+        default=0.0,
+        help="Rotate around the global X axis (roll) in degrees, applied first.",
+    )
+
+    parser.add_argument(
+        "--rotate_yaw",
+        type=float,
+        default=0.0,
+        help="Rotate around the global Z axis (yaw) in degrees, applied second.",
+    )
+
+    parser.add_argument(
+        "--rotate_pitch",
+        type=float,
+        default=0.0,
+        help="Rotate around the global Y axis (pitch) in degrees, applied third.",
+    )
+
+    parser.add_argument(
+        "--hide_floor",
+        default=False,
+        action="store_true",
+        help="Hide the floor/ground plane in the viewer and recorded video.",
+    )
+
+    parser.add_argument(
+        "--ik_config",
+        type=str,
+        default=None,
+        help="Path to a custom IK config JSON file. Overrides the default config for the chosen robot.",
+    )
+
     args = parser.parse_args()
 
 
     SMPLX_FOLDER = HERE / ".." / "assets" / "body_models"
     
     
-    # Load SMPLX trajectory
-    smplx_data, body_model, smplx_output, actual_human_height = load_smplx_file(
-        args.smplx_file, SMPLX_FOLDER
-    )
+    # Load SMPLX trajectory (support .npz, .json, and .pkl)
+    if args.smplx_file.endswith(".pkl"):
+        pkl_fps = args.fps if args.fps is not None else 30
+        smplx_data, body_model, smplx_output, actual_human_height = load_smplx_4dhumans_pkl(
+            args.smplx_file, SMPLX_FOLDER, fps=pkl_fps
+        )
+    elif args.smplx_file.endswith(".json"):
+        # Auto-detect fps: fit3d is 50 fps, MotionX/annotations format is 30 fps
+        import json as _json
+        with open(args.smplx_file) as _f:
+            _probe = _json.load(_f)
+        is_fit3d = 'annotations' not in _probe and 'transl' in _probe
+        json_fps = args.fps if args.fps is not None else (50 if is_fit3d else 30)
+        smplx_data, body_model, smplx_output, actual_human_height = load_smplx_json_file(
+            args.smplx_file, SMPLX_FOLDER, fps=json_fps
+        )
+    else:
+        smplx_data, body_model, smplx_output, actual_human_height = load_smplx_file(
+            args.smplx_file, SMPLX_FOLDER
+        )
     
     # align fps
     tgt_fps = 30
+
+    # Apply optional rotation (roll → yaw → pitch) to global orientation and joint positions
+    if args.rotate_roll != 0.0 or args.rotate_yaw != 0.0 or args.rotate_pitch != 0.0:
+        from scipy.spatial.transform import Rotation as R_scipy
+        combined_rot = (
+            R_scipy.from_euler('x', args.rotate_roll,  degrees=True) *
+            R_scipy.from_euler('z', args.rotate_yaw,   degrees=True) *
+            R_scipy.from_euler('y', args.rotate_pitch, degrees=True)
+        )
+
+        # Rotate global_orient in-place
+        go_np = smplx_output.global_orient.detach().numpy().reshape(-1, 3)
+        rotated_go = (combined_rot * R_scipy.from_rotvec(go_np)).as_rotvec().astype(np.float32)
+        smplx_output.global_orient.data.copy_(
+            torch.tensor(rotated_go).reshape(smplx_output.global_orient.shape))
+
+        # Rotate all joint positions in-place
+        joints_np = smplx_output.joints.detach().numpy()
+        N_f, J, _ = joints_np.shape
+        rotated_joints = combined_rot.apply(joints_np.reshape(-1, 3)).reshape(N_f, J, 3).astype(np.float32)
+        smplx_output.joints.data.copy_(torch.tensor(rotated_joints))
+
     smplx_data_frames, aligned_fps = get_smplx_data_offline_fast(smplx_data, body_model, smplx_output, tgt_fps=tgt_fps)
     
    
@@ -85,13 +182,17 @@ if __name__ == "__main__":
         actual_human_height=actual_human_height,
         src_human="smplx",
         tgt_robot=args.robot,
+        ik_config_path=args.ik_config,
     )
     
     robot_motion_viewer = RobotMotionViewer(robot_type=args.robot,
                                             motion_fps=aligned_fps,
                                             transparent_robot=0,
                                             record_video=args.record_video,
-                                            video_path=f"videos/{args.robot}_{args.smplx_file.split('/')[-1].split('.')[0]}.mp4",)
+                                            video_path=f"videos/{args.robot}_{args.smplx_file.split('/')[-1].split('.')[0]}.mp4",
+                                            camera_distance=args.camera_distance,
+                                            camera_elevation=args.camera_elevation,
+                                            hide_floor=args.hide_floor,)
     
 
     curr_frame = 0

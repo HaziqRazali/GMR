@@ -10,6 +10,82 @@ from smplx.joint_names import JOINT_NAMES
 from scipy.interpolate import interp1d
 
 
+def _rotmat_to_rotvec(arr):
+    """Convert (..., 3, 3) rotation matrices to (..., 3) axis-angle vectors."""
+    shape = arr.shape[:-2]
+    return R.from_matrix(arr.reshape(-1, 3, 3)).as_rotvec().reshape(*shape, 3)
+
+
+def _load_smplx_fit3d_dict(data, smplx_body_model_path, gender="neutral", fps=50):
+    """
+    Load SMPLX data from Fit3D flat-dict JSON format.
+    Keys: transl, global_orient, body_pose, betas, left_hand_pose,
+          right_hand_pose, jaw_pose, leye_pose, reye_pose, expression
+    Rotations stored as rotation matrices (N, J, 3, 3).
+    """
+    transl          = np.array(data['transl'])            # (N, 3)
+    global_orient   = np.array(data['global_orient'])     # (N, 1, 3, 3)
+    body_pose_mat   = np.array(data['body_pose'])         # (N, 21, 3, 3)
+    betas_arr       = np.array(data['betas'])             # (N, 10)
+    lhand_mat       = np.array(data['left_hand_pose'])    # (N, 15, 3, 3)
+    rhand_mat       = np.array(data['right_hand_pose'])   # (N, 15, 3, 3)
+    jaw_mat         = np.array(data['jaw_pose'])          # (N, 1, 3, 3)
+    leye_mat        = np.array(data['leye_pose'])         # (N, 1, 3, 3)
+    reye_mat        = np.array(data['reye_pose'])         # (N, 1, 3, 3)
+    expr            = np.array(data['expression'])        # (N, 10)
+
+    N = transl.shape[0]
+    print(f"Loaded {N} frames from Fit3D JSON file (rotation-matrix format)")
+
+    # Convert rotation matrices → axis-angle
+    root_orient = _rotmat_to_rotvec(global_orient[:, 0])          # (N, 3)
+    pose_body   = _rotmat_to_rotvec(body_pose_mat).reshape(N, -1) # (N, 63)
+    lhand_pose  = _rotmat_to_rotvec(lhand_mat).reshape(N, -1)     # (N, 45)
+    rhand_pose  = _rotmat_to_rotvec(rhand_mat).reshape(N, -1)     # (N, 45)
+    jaw_pose    = _rotmat_to_rotvec(jaw_mat[:, 0])                # (N, 3)
+    leye_pose   = _rotmat_to_rotvec(leye_mat[:, 0])               # (N, 3)
+    reye_pose   = _rotmat_to_rotvec(reye_mat[:, 0])               # (N, 3)
+
+    betas = np.mean(betas_arr, axis=0)                             # (10,)
+    betas_padded = np.pad(betas, (0, 6), mode='constant', constant_values=0)  # (16,)
+
+    smplx_data = {
+        'pose_body':        pose_body,
+        'betas':            betas_padded,
+        'root_orient':      root_orient,
+        'trans':            transl,
+        'gender':           np.array(gender),
+        'mocap_frame_rate': np.array(fps),
+    }
+
+    body_model = smplx.create(
+        smplx_body_model_path,
+        "smplx",
+        gender=gender,
+        use_pca=False,
+    )
+
+    smplx_output = body_model(
+        betas=             torch.tensor(betas_padded).float().view(1, -1),
+        global_orient=     torch.tensor(root_orient).float(),
+        body_pose=         torch.tensor(pose_body).float(),
+        transl=            torch.tensor(transl).float(),
+        left_hand_pose=    torch.tensor(lhand_pose).float(),
+        right_hand_pose=   torch.tensor(rhand_pose).float(),
+        jaw_pose=          torch.tensor(jaw_pose).float(),
+        leye_pose=         torch.tensor(leye_pose).float(),
+        reye_pose=         torch.tensor(reye_pose).float(),
+        expression=        torch.tensor(expr).float(),
+        return_full_pose=  True,
+    )
+
+    human_height = 1.66 + 0.1 * betas_padded[0]
+    print(f"Estimated human height: {human_height:.2f}m")
+    print(f"FPS: {fps}")
+
+    return smplx_data, body_model, smplx_output, human_height
+
+
 def load_smplx_json_file(json_file, smplx_body_model_path, gender="neutral", fps=30):
     """
     Load SMPLX data from JSON file format.
@@ -30,6 +106,11 @@ def load_smplx_json_file(json_file, smplx_body_model_path, gender="neutral", fps
     with open(json_file, 'r') as f:
         data = json.load(f)
     
+    # ---- Fit3D format: flat dict with per-param arrays and rotation matrices ----
+    if 'annotations' not in data and 'transl' in data:
+        return _load_smplx_fit3d_dict(data, smplx_body_model_path, gender=gender, fps=fps)
+    # ---------------------------------------------------------------------------
+
     annotations = data['annotations']
     num_frames = len(annotations)
     

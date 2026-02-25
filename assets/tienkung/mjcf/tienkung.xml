@@ -3,6 +3,9 @@
   <option integrator="implicitfast" />
   <size njmax="500" nconmax="100" />
   <compiler angle="radian" meshdir="../meshes/" eulerseq="zyx"/>
+  <visual>
+    <global offwidth="1920" offheight="1080"/>
+  </visual>
   <default>
     <joint type="hinge" limited="true" />
   </default>

@@ -75,14 +75,14 @@ def load_mib_data(idx, result_foldername, obj_idx, rep_idx):
                     all_object1_cloud_xz_center = np.squeeze(all_object1_cloud_xz_center)  # [max_num_objects, 3]
                 
                 # Extract MIB data
-                mib_body_pose_all = np.array(data["mib_body_pose"][obj_idx])  # [3, t, 1, 21, 3]
-                mib_global_translation_all = np.array(data["mib_global_translation"][obj_idx])  # [3, t, 3]
-                mib_global_orientation_all = np.array(data["mib_global_orientation"][obj_idx])  # [3, t, 3]
+                mib_body_pose_all = np.array(data["true_body_pose"][obj_idx])  # [3, t, 1, 21, 3]
+                mib_global_translation_all = np.array(data["true_global_translation"][obj_idx])  # [3, t, 3]
+                mib_global_orientation_all = np.array(data["true_global_orientation"][obj_idx])  # [3, t, 3]
                 
                 # Extract specific repetition
-                mib_body_pose = mib_body_pose_all[rep_idx]  # [t, 1, 21, 3]
-                mib_global_translation = mib_global_translation_all[rep_idx]  # [t, 3]
-                mib_global_orientation = mib_global_orientation_all[rep_idx]  # [t, 3]
+                mib_body_pose = mib_body_pose_all#[rep_idx]  # [t, 1, 21, 3]
+                mib_global_translation = mib_global_translation_all#[rep_idx]  # [t, 3]
+                mib_global_orientation = mib_global_orientation_all#[rep_idx]  # [t, 3]
                 
                 # Apply offsets (exactly like visualize_mib.py)
                 if is_all_objects:
@@ -90,7 +90,7 @@ def load_mib_data(idx, result_foldername, obj_idx, rep_idx):
                 mib_global_translation += center
                 
                 # Remove singleton dimension from body pose
-                mib_body_pose = mib_body_pose.squeeze(1)  # [t, 21, 3]
+                #mib_body_pose = mib_body_pose.squeeze(1)  # [t, 21, 3]
                 
                 metadata = {
                     "scene_name": data.get("scene_name", "unknown"),

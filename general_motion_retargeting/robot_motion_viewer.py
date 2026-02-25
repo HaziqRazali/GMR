@@ -48,12 +48,16 @@ class RobotMotionViewer:
                 camera_follow=True,
                 motion_fps=30,
                 transparent_robot=0,
+                hide_floor=False,
                 # video recording
                 record_video=False,
                 video_path=None,
-                video_width=640,
-                video_height=480,
+                video_width=1920,
+                video_height=1080,
                 keyboard_callback=None,
+                # camera override
+                camera_distance=None,
+                camera_elevation=-10,
                 ):
         
         self.robot_type = robot_type
@@ -61,8 +65,14 @@ class RobotMotionViewer:
         self.model = mj.MjModel.from_xml_path(str(self.xml_path))
         self.data = mj.MjData(self.model)
         self.robot_base = ROBOT_BASE_DICT[robot_type]
-        self.viewer_cam_distance = VIEWER_CAM_DISTANCE_DICT[robot_type]
+        self.viewer_cam_distance = camera_distance if camera_distance is not None else VIEWER_CAM_DISTANCE_DICT[robot_type]
+        self.viewer_cam_elevation = camera_elevation
         mj.mj_step(self.model, self.data)
+        
+        if hide_floor:
+            floor_id = mj.mj_name2id(self.model, mj.mjtObj.mjOBJ_GEOM, "floor")
+            if floor_id >= 0:
+                self.model.geom_rgba[floor_id, 3] = 0.0  # set alpha to 0
         
         self.motion_fps = motion_fps
         self.rate_limiter = RateLimiter(frequency=self.motion_fps, warn=False)
@@ -123,10 +133,11 @@ class RobotMotionViewer:
         
         mj.mj_forward(self.model, self.data)
         
+        # Always apply camera distance/elevation; only follow lookat when requested
+        self.viewer.cam.distance = self.viewer_cam_distance
+        self.viewer.cam.elevation = self.viewer_cam_elevation
         if follow_camera:
             self.viewer.cam.lookat = self.data.xpos[self.model.body(self.robot_base).id]
-            self.viewer.cam.distance = self.viewer_cam_distance
-            self.viewer.cam.elevation = -10  # 正面视角，轻微向下看
             # self.viewer.cam.azimuth = 180    # 正面朝向机器人
         
         if human_motion_data is not None:
