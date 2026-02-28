@@ -1,5 +1,8 @@
 <mujoco model="OpenLoog">
   <compiler angle="radian" meshdir="meshes/"/>
+  <visual>
+    <global offwidth="1920" offheight="1080"/>
+  </visual>
     <option timestep="0.001"  tolerance="1e-10" solver="Newton" jacobian="dense" cone="pyramidal" gravity="0 0 -9.81">  <!--integrator="RK4"  iteration="50"-->
         <flag contact="enable" energy="enable"/>
     </option>

@@ -58,6 +58,7 @@ class RobotMotionViewer:
                 # camera override
                 camera_distance=None,
                 camera_elevation=-10,
+                camera_height=0.0,
                 ):
         
         self.robot_type = robot_type
@@ -67,6 +68,7 @@ class RobotMotionViewer:
         self.robot_base = ROBOT_BASE_DICT[robot_type]
         self.viewer_cam_distance = camera_distance if camera_distance is not None else VIEWER_CAM_DISTANCE_DICT[robot_type]
         self.viewer_cam_elevation = camera_elevation
+        self.viewer_cam_height = camera_height
         mj.mj_step(self.model, self.data)
         
         if hide_floor:
@@ -102,6 +104,12 @@ class RobotMotionViewer:
             
             # Initialize renderer for video recording
             self.renderer = mj.Renderer(self.model, height=video_height, width=video_width)
+            # Dedicated camera for the renderer – independent of the passive viewer window
+            self.render_cam = mj.MjvCamera()
+            self.render_cam.type = mj.mjtCamera.mjCAMERA_FREE
+            self.render_cam.distance = self.viewer_cam_distance
+            self.render_cam.elevation = self.viewer_cam_elevation
+            self.render_cam.azimuth = self.viewer.cam.azimuth  # inherit initial azimuth
         
     def step(self, 
             # robot data
@@ -132,13 +140,31 @@ class RobotMotionViewer:
         self.data.qpos[7:] = dof_pos
         
         mj.mj_forward(self.model, self.data)
-        
+
+        # Compute effective distance/elevation so the camera is physically
+        # camera_height metres higher in world-Z while still aimed at the robot.
+        # MuJoCo convention: cam_z_above_lookat = distance * sin(-elevation_rad)
+        # We raise that by camera_height, then back-solve distance and elevation.
+        el_rad = np.radians(self.viewer_cam_elevation)
+        h_dist  = self.viewer_cam_distance * np.cos(el_rad)       # horizontal dist (unchanged)
+        v_above = self.viewer_cam_distance * np.sin(-el_rad) + self.viewer_cam_height  # new Z offset
+        eff_dist = float(np.sqrt(h_dist ** 2 + v_above ** 2))
+        eff_elev = float(-np.degrees(np.arctan2(v_above, h_dist)))  # negative = above
+
         # Always apply camera distance/elevation; only follow lookat when requested
-        self.viewer.cam.distance = self.viewer_cam_distance
-        self.viewer.cam.elevation = self.viewer_cam_elevation
+        self.viewer.cam.distance = eff_dist
+        self.viewer.cam.elevation = eff_elev
         if follow_camera:
-            self.viewer.cam.lookat = self.data.xpos[self.model.body(self.robot_base).id]
+            self.viewer.cam.lookat = self.data.xpos[self.model.body(self.robot_base).id].copy()
             # self.viewer.cam.azimuth = 180    # 正面朝向机器人
+
+        # Keep the dedicated render camera in sync (immune to viewer.sync() overrides)
+        if self.record_video:
+            self.render_cam.distance = eff_dist
+            self.render_cam.elevation = eff_elev
+            self.render_cam.azimuth = self.viewer.cam.azimuth
+            if follow_camera:
+                self.render_cam.lookat[:] = self.data.xpos[self.model.body(self.robot_base).id].copy()
         
         if human_motion_data is not None:
             # Clean custom geometry
@@ -159,8 +185,8 @@ class RobotMotionViewer:
             self.rate_limiter.sleep()
 
         if self.record_video:
-            # Use renderer for proper offscreen rendering
-            self.renderer.update_scene(self.data, camera=self.viewer.cam)
+            # Use the dedicated render camera so viewer.sync() cannot override our settings
+            self.renderer.update_scene(self.data, camera=self.render_cam)
             img = self.renderer.render()
             self.mp4_writer.append_data(img)
     

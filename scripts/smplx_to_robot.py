@@ -61,6 +61,13 @@ if __name__ == "__main__":
     )
 
     parser.add_argument(
+        "--video_path",
+        type=str,
+        default=None,
+        help="Path to save the recorded video.",
+    )
+
+    parser.add_argument(
         "--rate_limit",
         default=False,
         action="store_true",
@@ -79,6 +86,14 @@ if __name__ == "__main__":
         type=float,
         default=-10,
         help="Camera elevation angle in degrees (negative = looking down). Default: -10.",
+    )
+
+    parser.add_argument(
+        "--camera_height",
+        type=float,
+        default=0.0,
+        help="Vertical offset (metres) added to the camera lookat point. "
+             "Positive = camera looks at a higher point, effectively raising the viewpoint. Default: 0.",
     )
 
     parser.add_argument(
@@ -121,6 +136,21 @@ if __name__ == "__main__":
         type=str,
         default=None,
         help="Path to a custom IK config JSON file. Overrides the default config for the chosen robot.",
+    )
+
+    parser.add_argument(
+        "--zero_global_orient",
+        default=False,
+        action="store_true",
+        help="Zero out the initial global orientation of the human SMPL-X after loading, "
+             "so all frames are expressed relative to the first frame's orientation.",
+    )
+
+    parser.add_argument(
+        "--no_viewer",
+        default=False,
+        action="store_true",
+        help="Run headless (no MuJoCo viewer). Only IK + save. Use for batch processing.",
     )
 
     args = parser.parse_args()
@@ -174,6 +204,19 @@ if __name__ == "__main__":
         rotated_joints = combined_rot.apply(joints_np.reshape(-1, 3)).reshape(N_f, J, 3).astype(np.float32)
         smplx_output.joints.data.copy_(torch.tensor(rotated_joints))
 
+    # Zero out the initial global orientation so frame 0 becomes identity
+    if args.zero_global_orient:
+        from scipy.spatial.transform import Rotation as R_scipy
+        go_np = smplx_output.global_orient.detach().numpy().reshape(-1, 3)
+        init_rot_inv = R_scipy.from_rotvec(go_np[0]).inv()
+        zeroed_go = (init_rot_inv * R_scipy.from_rotvec(go_np)).as_rotvec().astype(np.float32)
+        smplx_output.global_orient.data.copy_(
+            torch.tensor(zeroed_go).reshape(smplx_output.global_orient.shape))
+        joints_np = smplx_output.joints.detach().numpy()
+        N_f, J, _ = joints_np.shape
+        zeroed_joints = init_rot_inv.apply(joints_np.reshape(-1, 3)).reshape(N_f, J, 3).astype(np.float32)
+        smplx_output.joints.data.copy_(torch.tensor(zeroed_joints))
+
     smplx_data_frames, aligned_fps = get_smplx_data_offline_fast(smplx_data, body_model, smplx_output, tgt_fps=tgt_fps)
     
    
@@ -185,15 +228,16 @@ if __name__ == "__main__":
         ik_config_path=args.ik_config,
     )
     
-    robot_motion_viewer = RobotMotionViewer(robot_type=args.robot,
-                                            motion_fps=aligned_fps,
-                                            transparent_robot=0,
-                                            record_video=args.record_video,
-                                            video_path=f"videos/{args.robot}_{args.smplx_file.split('/')[-1].split('.')[0]}.mp4",
-                                            camera_distance=args.camera_distance,
-                                            camera_elevation=args.camera_elevation,
-                                            hide_floor=args.hide_floor,)
-    
+    if not args.no_viewer:
+        robot_motion_viewer = RobotMotionViewer(robot_type=args.robot,
+                                                motion_fps=aligned_fps,
+                                                transparent_robot=0,
+                                                record_video=args.record_video,
+                                                video_path=args.video_path if args.video_path is not None else f"videos/{args.robot}_{args.smplx_file.split('/')[-1].split('.')[0]}.mp4",
+                                                camera_distance=args.camera_distance,
+                                                camera_elevation=args.camera_elevation,
+                                                camera_height=args.camera_height,
+                                                hide_floor=args.hide_floor,)
 
     curr_frame = 0
     # FPS measurement variables
@@ -234,17 +278,18 @@ if __name__ == "__main__":
         qpos = retarget.retarget(smplx_data)
 
         # visualize
-        robot_motion_viewer.step(
-            root_pos=qpos[:3],
-            root_rot=qpos[3:7],
-            dof_pos=qpos[7:],
-            human_motion_data=retarget.scaled_human_data,
-            # human_motion_data=smplx_data,
-            human_pos_offset=np.array([0.0, 0.0, 0.0]),
-            show_human_body_name=False,
-            rate_limit=args.rate_limit,
-            follow_camera=False,
-        )
+        if not args.no_viewer:
+            robot_motion_viewer.step(
+                root_pos=qpos[:3],
+                root_rot=qpos[3:7],
+                dof_pos=qpos[7:],
+                human_motion_data=retarget.scaled_human_data,
+                # human_motion_data=smplx_data,
+                human_pos_offset=np.array([0.0, 0.0, 0.0]),
+                show_human_body_name=False,
+                rate_limit=args.rate_limit,
+                follow_camera=False,
+            )
         if args.save_path is not None:
             qpos_list.append(qpos)
             
@@ -268,7 +313,6 @@ if __name__ == "__main__":
         with open(args.save_path, "wb") as f:
             pickle.dump(motion_data, f)
         print(f"Saved to {args.save_path}")
-            
-      
-    
-    robot_motion_viewer.close()
+
+    if not args.no_viewer:
+        robot_motion_viewer.close()
