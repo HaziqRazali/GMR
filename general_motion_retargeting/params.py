@@ -75,6 +75,9 @@ IK_CONFIG_DICT = {
     "xrobot":{
         "unitree_g1": IK_CONFIG_ROOT / "xrobot_to_g1.json",
     },
+    "mhr":{
+        "booster_t1": IK_CONFIG_ROOT / "mhr_to_t1.json",
+    },
 }
 
 

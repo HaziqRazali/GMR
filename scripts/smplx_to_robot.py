@@ -153,6 +153,13 @@ if __name__ == "__main__":
         help="Run headless (no MuJoCo viewer). Only IK + save. Use for batch processing.",
     )
 
+    parser.add_argument(
+        "--freeze_at_end",
+        default=False,
+        action="store_true",
+        help="Keep the viewer open on the last frame instead of closing (useful for single-frame inputs).",
+    )
+
     args = parser.parse_args()
 
 
@@ -252,7 +259,7 @@ if __name__ == "__main__":
         qpos_list = []
     
     # Start the viewer
-    i = 0
+    i = -1
 
     while True:
         if args.loop:
@@ -260,6 +267,19 @@ if __name__ == "__main__":
         else:
             i += 1
             if i >= len(smplx_data_frames):
+                if args.freeze_at_end and not args.no_viewer:
+                    print("[freeze_at_end] Holding last frame. Close the window to exit.")
+                    while robot_motion_viewer.viewer.is_running():
+                        robot_motion_viewer.step(
+                            root_pos=qpos[:3],
+                            root_rot=qpos[3:7],
+                            dof_pos=qpos[7:],
+                            human_motion_data=retarget.scaled_human_data,
+                            human_pos_offset=np.array([0.0, 0.0, 0.0]),
+                            show_human_body_name=False,
+                            rate_limit=args.rate_limit,
+                            follow_camera=False,
+                        )
                 break
         
         # FPS measurement

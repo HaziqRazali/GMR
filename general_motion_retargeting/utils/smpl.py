@@ -13,11 +13,14 @@ def load_smpl_file(smpl_file):
 
 def load_smplx_file(smplx_file, smplx_body_model_path):
     smplx_data = np.load(smplx_file, allow_pickle=True)
+    # Infer num_betas from saved data so the model's shapedirs size matches
+    num_betas = int(np.array(smplx_data["betas"]).reshape(-1).shape[0])
     body_model = smplx.create(
         smplx_body_model_path,
         "smplx",
         gender=str(smplx_data["gender"]),
         use_pca=False,
+        num_betas=num_betas,
     )
     # print(smplx_data["pose_body"].shape)
     # print(smplx_data["betas"].shape)
@@ -25,13 +28,20 @@ def load_smplx_file(smplx_file, smplx_body_model_path):
     # print(smplx_data["trans"].shape)
     
     num_frames = smplx_data["pose_body"].shape[0]
+    # Use saved hand poses if available (e.g. from MHR conversion), else zero
+    if "left_hand_pose" in smplx_data.files:
+        lhand = torch.tensor(smplx_data["left_hand_pose"]).float().expand(num_frames, -1)
+        rhand = torch.tensor(smplx_data["right_hand_pose"]).float().expand(num_frames, -1)
+    else:
+        lhand = torch.zeros(num_frames, 45).float()
+        rhand = torch.zeros(num_frames, 45).float()
     smplx_output = body_model(
-        betas=torch.tensor(smplx_data["betas"]).float().view(1, -1), # (16,)
+        betas=torch.tensor(smplx_data["betas"]).float().view(1, -1), # (1, num_betas)
         global_orient=torch.tensor(smplx_data["root_orient"]).float(), # (N, 3)
         body_pose=torch.tensor(smplx_data["pose_body"]).float(), # (N, 63)
         transl=torch.tensor(smplx_data["trans"]).float(), # (N, 3)
-        left_hand_pose=torch.zeros(num_frames, 45).float(),
-        right_hand_pose=torch.zeros(num_frames, 45).float(),
+        left_hand_pose=lhand,
+        right_hand_pose=rhand,
         jaw_pose=torch.zeros(num_frames, 3).float(),
         leye_pose=torch.zeros(num_frames, 3).float(),
         reye_pose=torch.zeros(num_frames, 3).float(),
@@ -179,9 +189,9 @@ def get_smplx_data_offline_fast(smplx_data, body_model, smplx_output, tgt_fps=30
     src_fps = smplx_data["mocap_frame_rate"].item()
     frame_skip = int(src_fps / tgt_fps)
     num_frames = smplx_data["pose_body"].shape[0]
-    global_orient = smplx_output.global_orient.squeeze()
+    global_orient = smplx_output.global_orient.detach().numpy().reshape(num_frames, 3)
     full_body_pose = smplx_output.full_pose.reshape(num_frames, -1, 3)
-    joints = smplx_output.joints.detach().numpy().squeeze()
+    joints = smplx_output.joints.detach().numpy().reshape(num_frames, -1, 3)
     joint_names = JOINT_NAMES[: len(body_model.parents)]
     parents = body_model.parents
     
@@ -272,9 +282,9 @@ def get_gvhmr_data_offline_fast(smplx_data, body_model, smplx_output, tgt_fps=30
     src_fps = smplx_data["mocap_frame_rate"].item()
     frame_skip = int(src_fps / tgt_fps)
     num_frames = smplx_data["pose_body"].shape[0]
-    global_orient = smplx_output.global_orient.squeeze()
+    global_orient = smplx_output.global_orient.detach().numpy().reshape(num_frames, 3)
     full_body_pose = smplx_output.full_pose.reshape(num_frames, -1, 3)
-    joints = smplx_output.joints.detach().numpy().squeeze()
+    joints = smplx_output.joints.detach().numpy().reshape(num_frames, -1, 3)
     joint_names = JOINT_NAMES[: len(body_model.parents)]
     parents = body_model.parents
     
