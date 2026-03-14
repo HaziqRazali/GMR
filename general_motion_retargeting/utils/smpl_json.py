@@ -63,6 +63,7 @@ def _load_smplx_fit3d_dict(data, smplx_body_model_path, gender="neutral", fps=50
         "smplx",
         gender=gender,
         use_pca=False,
+        num_betas=len(betas_padded),
     )
 
     smplx_output = body_model(
@@ -200,6 +201,7 @@ def load_smplx_json_file(json_file, smplx_body_model_path, gender="neutral", fps
         "smplx",
         gender=gender,
         use_pca=False,
+        num_betas=len(betas_padded),
     )
     
     # Run forward pass

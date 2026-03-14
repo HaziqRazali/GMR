@@ -45,7 +45,7 @@ def load_smplx_file(smplx_file, smplx_body_model_path):
         jaw_pose=torch.zeros(num_frames, 3).float(),
         leye_pose=torch.zeros(num_frames, 3).float(),
         reye_pose=torch.zeros(num_frames, 3).float(),
-        # expression=torch.zeros(num_frames, 10).float(),
+        expression=torch.zeros(num_frames, 10).float(),
         return_full_pose=True,
     )
     

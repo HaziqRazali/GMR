@@ -1,40 +1,17 @@
 """
-mhr_to_robot.py — retarget MHR skeleton motion to a robot using GMR.
+Retarget MHR .npz motion to a humanoid robot.
+Mirrors smplx_to_robot.py exactly — no normalisation applied.
+Raw MHR global orientations are fed directly into the IK.
 
-Loads an MHR NPZ file (output of sam-3d-body demo.py, i.e. img.npz),
-runs the MHR forward pass to obtain per-frame skeleton joint positions and
-orientations, builds the human-motion frame dict using the MHR→T1 joint
-mapping, then drives GMR's IK solver.
+This is intentional: the script is used to demonstrate what happens when
+the rest pose of the source body model differs from SMPL-X T-pose.
 
-MHR → robot joint mapping (from compare_mhr_smplx_joints.py):
-    root      ← MHR idx  1  (pelvis / root)
-    l_upleg   ← MHR idx  2  (left hip)
-    r_upleg   ← MHR idx 18  (right hip)
-    l_lowleg  ← MHR idx  3  (left knee)
-    r_lowleg  ← MHR idx 19  (right knee)
-    c_spine3  ← MHR idx 37  (spine3, OVERRIDE)
-    l_ball    ← MHR idx  8  (left foot)
-    r_ball    ← MHR idx 24  (right foot)
-    l_uparm   ← MHR idx 75  (left shoulder)
-    r_uparm   ← MHR idx 39  (right shoulder)
-    l_lowarm  ← MHR idx 76  (left elbow)
-    r_lowarm  ← MHR idx 40  (right elbow)
-
-Usage:
-    conda activate mhr_new
-    cd /home/haziq/GMR
-    python scripts/mhr_to_robot.py \\
-        --mhr_file /home/haziq/sam-3d-body/example_data/results/img.npz \\
-        --robot booster_t1 \\
-        --rotate_roll 90 \\
-        --rate_limit --freeze_at_end
-
-    # Save retargeted motion:
-    python scripts/mhr_to_robot.py \\
-        --mhr_file /home/haziq/sam-3d-body/example_data/results/img.npz \\
-        --robot booster_t1 \\
-        --rotate_roll 90 \\
-        --save_path output_mhr_t1.pkl
+Usage (mhr_new env):
+    python scripts/mhr_to_robot.py \
+        --mhr_file /path/to/motion.npz \
+        --robot booster_t1 \
+        --rate_limit \
+        --camera_distance 5.5 --camera_elevation -15 --rotate_yaw -90
 """
 
 import argparse
@@ -45,341 +22,240 @@ import time
 
 import numpy as np
 import torch
-
-# ── locate the MHR package ────────────────────────────────────────────────────
-_MHR_ROOT = pathlib.Path("/home/haziq/MHR")
-if str(_MHR_ROOT) not in sys.path:
-    sys.path.insert(0, str(_MHR_ROOT))
-
-from mhr.mhr import MHR
+from scipy.interpolate import interp1d
+from scipy.spatial.transform import Rotation as R
 
 from general_motion_retargeting import GeneralMotionRetargeting as GMR
 from general_motion_retargeting import RobotMotionViewer
 
 from rich import print
 
-
-# ── MHR joint index → human name mapping (matches mhr_to_t1.json) ────────────
-_MHR_IK_JOINT_IDX: dict[str, int] = {
-    "root":     1,   # pelvis
-    "l_upleg":  2,   # left hip
-    "r_upleg":  18,  # right hip
-    "l_lowleg": 3,   # left knee
-    "r_lowleg": 19,  # right knee
-    "c_spine3": 37,  # spine3
-    "l_ball":   8,   # left foot
-    "r_ball":   24,  # right foot
-    "l_uparm":  75,  # left shoulder
-    "r_uparm":  39,  # right shoulder
-    "l_lowarm": 76,  # left elbow
-    "r_lowarm": 40,  # right elbow
+# ---------------------------------------------------------------------------
+# MHR joint index → name used in mhr_to_*.json IK configs
+# ---------------------------------------------------------------------------
+_MHR_IK_JOINTS = {
+    1:  "root",
+    2:  "l_upleg",
+    18: "r_upleg",
+    3:  "l_lowleg",
+    19: "r_lowleg",
+    37: "c_spine3",
+    8:  "l_ball",
+    24: "r_ball",
+    75: "l_uparm",
+    39: "r_uparm",
+    76: "l_lowarm",
+    40: "r_lowarm",
 }
+_MHR_IK_INDICES = sorted(_MHR_IK_JOINTS.keys())
 
-# ── default input file ────────────────────────────────────────────────────────
-_DEFAULT_MHR_FILE = "/home/haziq/sam-3d-body/example_data/results/img.npz"
+_HEAD_IDX  = 113
+_LBALL_IDX = 8
+_RBALL_IDX = 24
 
 
-def load_mhr_file(mhr_file: str, device: torch.device):
-    """
-    Load an MHR NPZ file, run the MHR forward pass for every frame, and
-    return:
-        skel_states  : (N, 127, 8) numpy float32 — global joint transforms
-                       [:, :, :3]  = position in cm
-                       [:, :, 3:7] = quaternion (w, x, y, z) scalar-first
-        fps          : float — motion fps (30 if not stored in NPZ)
-    """
-    data = np.load(mhr_file, allow_pickle=True)
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
 
-    if "body_pose_params" not in data.files:
-        raise KeyError(
-            f"'{mhr_file}' is missing 'body_pose_params'. "
-            "Re-run demo.py to regenerate the NPZ."
-        )
+def _slerp(r1, r2, t):
+    q1 = r1.as_quat(); q2 = r2.as_quat()
+    q1 /= np.linalg.norm(q1); q2 /= np.linalg.norm(q2)
+    dot = np.dot(q1, q2)
+    if dot < 0: q2 = -q2; dot = -dot
+    if dot > 0.9995:
+        return R.from_quat(q1 + t * (q2 - q1))
+    theta0 = np.arccos(np.clip(dot, -1, 1))
+    theta  = theta0 * t
+    s0 = np.cos(theta) - dot * np.sin(theta) / np.sin(theta0)
+    s1 = np.sin(theta) / np.sin(theta0)
+    return R.from_quat(s0 * q1 + s1 * q2)
 
-    body_pose_params = data["body_pose_params"]  # (133,) or (N, 133)
-    if body_pose_params.ndim == 1:
-        body_pose_params = body_pose_params[np.newaxis, :]  # → (1, 133)
 
-    N = body_pose_params.shape[0]
-    print(f"  MHR file: {mhr_file}  ({N} frame(s))")
+# ---------------------------------------------------------------------------
+# MHR loading — raw orientations, no normalisation
+# ---------------------------------------------------------------------------
 
-    # ── load MHR model ──────────────────────────────────────────────────────
-    print(f"  Loading MHR model (device={device}, lod=1) ...")
-    mhr_model = MHR.from_files(device=device, lod=1)
+def load_mhr_npz(mhr_file, mhr_root="~/MHR", device="cpu", batch_size=256, fps=None):
+    mhr_root = os.path.expanduser(mhr_root)
+    if mhr_root not in sys.path:
+        sys.path.insert(0, mhr_root)
+    from mhr.mhr import MHR  # type: ignore
 
-    # ── build batched model params ──────────────────────────────────────────
-    # model_params (N, 204):
-    #   [0:6]    zeros — global trans (3) + global rot (3)
-    #   [6:136]  body_pose_params[:, :130]
-    #   [136:204] zeros — scale params (68)
-    model_params = torch.zeros(N, 204, dtype=torch.float32, device=device)
-    model_params[:, 6:136] = torch.tensor(
-        body_pose_params[:, :130], dtype=torch.float32, device=device
-    )
+    data    = np.load(mhr_file, allow_pickle=True)
+    T       = data["param_lbs_model_params"].shape[0]
+    model_p = torch.tensor(data["param_lbs_model_params"], dtype=torch.float32)
+    shape_p = torch.tensor(data["param_identity_coeffs"],  dtype=torch.float32)
+    expr_p  = torch.tensor(data["param_face_expr_coeffs"], dtype=torch.float32)
 
-    shape_params = torch.zeros(N, 45, dtype=torch.float32, device=device)
-    expr_params  = torch.zeros(N, 72, dtype=torch.float32, device=device)
+    dev = torch.device(device)
+    print(f"[MHR] Loading model (device={dev}) ...")
+    mhr_model = MHR.from_files(device=dev, lod=1)
 
-    # ── MHR forward pass (batched) ──────────────────────────────────────────
-    print(f"  Running MHR forward pass (batch={N}) ...")
+    all_skel = []
+    for start in range(0, T, batch_size):
+        end = min(start + batch_size, T)
+        with torch.no_grad():
+            _, skel = mhr_model(shape_p[start:end].to(dev),
+                                model_p[start:end].to(dev),
+                                expr_p [start:end].to(dev))
+        all_skel.append(skel.cpu())
+        if start == 0 or start % (batch_size * 4) == 0:
+            print(f"  frames {start}-{end} / {T}")
+    skel_state = torch.cat(all_skel, dim=0).numpy()  # (T, 127, 8)
+
+    # T-pose forward pass — only used for height estimation
     with torch.no_grad():
-        _, skel_state = mhr_model(shape_params, model_params, expr_params)
-    # skel_state: (N, 127, 8)  — positions in cm, quat wxyz
+        _, tpose_skel = mhr_model(
+            shape_p[0:1].to(dev),
+            torch.zeros(1, 204, device=dev),
+            torch.zeros(1,  72, device=dev),
+        )
+    tpose_np = tpose_skel[0].cpu().numpy()  # (127, 8)
 
-    skel_states = skel_state.cpu().numpy().astype(np.float32)  # (N, 127, 8)
+    ik_idxs = np.array(_MHR_IK_INDICES)
 
-    # Try to read fps from NPZ; default to 30
-    if "mocap_frame_rate" in data.files:
-        fps = float(np.array(data["mocap_frame_rate"]).item())
+    # Raw quaternions: xyzw from MHR -> wxyz for GMR
+    q_xyzw = skel_state[:, ik_idxs, 3:7]              # (T, N_ik, 4)
+    quats_wxyz = q_xyzw[:, :, [3, 0, 1, 2]]           # (T, N_ik, 4) wxyz
+
+    # Positions: cm -> m
+    positions = skel_state[:, ik_idxs, :3] / 100.0    # (T, N_ik, 3)
+
+    head_y = tpose_np[_HEAD_IDX,  1] / 100.0
+    foot_y = min(tpose_np[_LBALL_IDX, 1], tpose_np[_RBALL_IDX, 1]) / 100.0
+    human_height = (head_y - foot_y) + 0.15
+    print(f"  Estimated human height: {human_height:.3f} m")
+
+    joint_names = [_MHR_IK_JOINTS[idx] for idx in _MHR_IK_INDICES]
+    src_fps = fps if fps is not None else 50
+    print(f"[MHR] {T} frames at {src_fps} FPS")
+
+    return positions, quats_wxyz, joint_names, src_fps, human_height
+
+
+def get_mhr_frames(positions, quats_wxyz, joint_names, src_fps, tgt_fps=30):
+    T = positions.shape[0]
+
+    if tgt_fps < src_fps:
+        frame_skip  = int(src_fps / tgt_fps)
+        new_T       = T // frame_skip
+        orig_time   = np.arange(T)
+        target_time = np.linspace(0, T - 1, new_T)
+        N_j         = positions.shape[1]
+
+        pos_out = np.empty((new_T, N_j, 3), dtype=np.float32)
+        for j in range(N_j):
+            for d in range(3):
+                pos_out[:, j, d] = interp1d(orig_time, positions[:, j, d])(target_time)
+
+        quat_out = np.empty((new_T, N_j, 4), dtype=np.float32)
+        for j in range(N_j):
+            for k, t_val in enumerate(target_time):
+                i1 = int(np.floor(t_val)); i2 = min(i1 + 1, T - 1)
+                alpha = t_val - i1
+                q1 = quats_wxyz[i1, j]; q2 = quats_wxyz[i2, j]
+                r1 = R.from_quat([q1[1], q1[2], q1[3], q1[0]])
+                r2 = R.from_quat([q2[1], q2[2], q2[3], q2[0]])
+                quat_out[k, j] = _slerp(r1, r2, alpha).as_quat(scalar_first=True)
+
+        positions   = pos_out
+        quats_wxyz  = quat_out
+        aligned_fps = float(new_T) / T * src_fps
     else:
-        fps = 30.0
+        aligned_fps = float(tgt_fps)
 
-    return skel_states, fps
+    frames = [{name: (positions[t, j], quats_wxyz[t, j])
+               for j, name in enumerate(joint_names)}
+              for t in range(len(positions))]
 
-
-def compute_human_height(skel_states: np.ndarray) -> float:
-    """
-    Estimate the standing height of the MHR character (metres) using the
-    first frame's skeleton: 3-D distance from l_ball (joint 8) to c_head
-    (joint 113), converted from cm to metres.
-    """
-    skel0 = skel_states[0]  # (127, 8)
-    head_pos  = skel0[113, :3]  # c_head
-    foot_pos  = skel0[8,   :3]  # l_ball
-    height_cm = float(np.linalg.norm(head_pos - foot_pos))
-    return height_cm / 100.0
+    return frames, aligned_fps
 
 
-def build_frame_data(skel_frame: np.ndarray) -> dict:
-    """
-    Build the per-frame human-motion dict expected by GMR.retarget():
-        { joint_name: (pos_m, quat_wxyz), ... }
-
-    skel_frame : (127, 8) — one row per MHR joint
-                   [:3]  = position in cm
-                   [3:7] = quaternion (w, x, y, z) scalar-first
-    """
-    frame_data = {}
-    for name, idx in _MHR_IK_JOINT_IDX.items():
-        pos_m     = skel_frame[idx, :3] / 100.0   # cm → metres
-        quat_wxyz = skel_frame[idx, 3:7]           # (w, x, y, z)
-        frame_data[name] = (pos_m, quat_wxyz)
-    return frame_data
-
-
-def apply_rotation(skel_states: np.ndarray,
-                   roll_deg: float,
-                   yaw_deg: float,
-                   pitch_deg: float) -> np.ndarray:
-    """
-    Apply roll → yaw → pitch rotation to all joint positions and orientations
-    in skel_states.  Mirrors the rotate logic in smplx_to_robot.py.
-
-    skel_states : (N, 127, 8)  positions in cm, quat wxyz
-    Returns     : (N, 127, 8) rotated
-    """
-    from scipy.spatial.transform import Rotation as R_scipy
-
-    combined_rot = (
-        R_scipy.from_euler('x', roll_deg,  degrees=True) *
-        R_scipy.from_euler('z', yaw_deg,   degrees=True) *
-        R_scipy.from_euler('y', pitch_deg, degrees=True)
-    )
-
-    N, J, _ = skel_states.shape
-    out = skel_states.copy()
-
-    # rotate positions (cm — rotation doesn't care about scale)
-    pos = out[:, :, :3].reshape(-1, 3)
-    out[:, :, :3] = combined_rot.apply(pos).reshape(N, J, 3)
-
-    # rotate orientations (wxyz → xyzw for scipy → rotate → back to wxyz)
-    quat_wxyz = out[:, :, 3:7].reshape(-1, 4)
-    quat_xyzw = quat_wxyz[:, [1, 2, 3, 0]]
-    rotated_xyzw = (combined_rot * R_scipy.from_quat(quat_xyzw)).as_quat()
-    out[:, :, 3:7] = rotated_xyzw[:, [3, 0, 1, 2]].reshape(N, J, 4)
-
-    return out
-
-
-# ─────────────────────────────────────────────────────────────────────────────
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
-
     HERE = pathlib.Path(__file__).parent
 
-    parser = argparse.ArgumentParser(
-        description="Retarget MHR skeleton motion (img.npz) to a robot via GMR.",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-    )
-
-    parser.add_argument(
-        "--mhr_file",
-        type=str,
-        default=_DEFAULT_MHR_FILE,
-        help="Path to MHR NPZ file (output of sam-3d-body demo.py).",
-    )
-
-    parser.add_argument(
-        "--robot",
-        choices=["booster_t1"],   # extend here as more mhr_to_<robot>.json files are added
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--mhr_file", required=True)
+    parser.add_argument("--robot",
+        choices=["unitree_g1", "unitree_g1_with_hands", "unitree_h1", "unitree_h1_2",
+                 "booster_t1", "booster_t1_29dof", "stanford_toddy", "fourier_n1",
+                 "engineai_pm01", "kuavo_s45", "hightorque_hi", "galaxea_r1pro",
+                 "berkeley_humanoid_lite", "booster_k1", "pnd_adam_lite", "openloong",
+                 "tienkung", "fourier_gr3"],
         default="booster_t1",
-        help="Target robot name (default: booster_t1).",
     )
-
-    parser.add_argument(
-        "--device",
-        default="cpu",
-        help="Torch device for MHR forward pass: cpu or cuda (default: cpu).",
-    )
-
-    parser.add_argument(
-        "--save_path",
-        default=None,
-        help="Path to save the retargeted robot motion as a .pkl file.",
-    )
-
-    parser.add_argument(
-        "--loop",
-        default=False,
-        action="store_true",
-        help="Loop the motion.",
-    )
-
-    parser.add_argument(
-        "--record_video",
-        default=False,
-        action="store_true",
-        help="Record viewer output to video.",
-    )
-
-    parser.add_argument(
-        "--video_path",
-        type=str,
-        default=None,
-        help="Path to save the recorded video.",
-    )
-
-    parser.add_argument(
-        "--rate_limit",
-        default=False,
-        action="store_true",
-        help="Limit playback rate to match input motion FPS.",
-    )
-
-    parser.add_argument(
-        "--camera_distance",
-        type=float,
-        default=None,
-        help="Camera distance (zoom level).",
-    )
-
-    parser.add_argument(
-        "--camera_elevation",
-        type=float,
-        default=-10,
-        help="Camera elevation angle in degrees (default: -10).",
-    )
-
-    parser.add_argument(
-        "--camera_height",
-        type=float,
-        default=0.0,
-        help="Vertical camera lookat offset in metres (default: 0).",
-    )
-
-    parser.add_argument(
-        "--rotate_roll",
-        type=float,
-        default=0.0,
-        help="Rotate around global X axis (roll) in degrees, applied first.",
-    )
-
-    parser.add_argument(
-        "--rotate_yaw",
-        type=float,
-        default=0.0,
-        help="Rotate around global Z axis (yaw) in degrees, applied second.",
-    )
-
-    parser.add_argument(
-        "--rotate_pitch",
-        type=float,
-        default=0.0,
-        help="Rotate around global Y axis (pitch) in degrees, applied third.",
-    )
-
-    parser.add_argument(
-        "--hide_floor",
-        default=False,
-        action="store_true",
-        help="Hide the floor/ground plane in the viewer.",
-    )
-
-    parser.add_argument(
-        "--ik_config",
-        type=str,
-        default=None,
-        help="Path to a custom IK config JSON. Overrides the default mhr_to_<robot>.json.",
-    )
-
-    parser.add_argument(
-        "--no_viewer",
-        default=False,
-        action="store_true",
-        help="Run headless (no MuJoCo viewer). Only IK + save.",
-    )
-
-    parser.add_argument(
-        "--freeze_at_end",
-        default=False,
-        action="store_true",
-        help="Keep the viewer open on the last frame instead of closing.",
-    )
-
+    parser.add_argument("--mhr_root",         default="~/MHR")
+    parser.add_argument("--device",           default="cpu")
+    parser.add_argument("--fps",              type=int,   default=None)
+    parser.add_argument("--save_path",        default=None)
+    parser.add_argument("--loop",             action="store_true")
+    parser.add_argument("--record_video",     action="store_true")
+    parser.add_argument("--video_path",       type=str,   default=None)
+    parser.add_argument("--rate_limit",       action="store_true")
+    parser.add_argument("--camera_distance",  type=float, default=None)
+    parser.add_argument("--camera_elevation", type=float, default=-10)
+    parser.add_argument("--camera_height",    type=float, default=0.0)
+    parser.add_argument("--rotate_roll",      type=float, default=0.0)
+    parser.add_argument("--rotate_yaw",       type=float, default=0.0)
+    parser.add_argument("--rotate_pitch",     type=float, default=0.0)
+    parser.add_argument("--hide_floor",       action="store_true")
+    parser.add_argument("--ik_config",        type=str,   default=None)
+    parser.add_argument("--no_viewer",        action="store_true")
+    parser.add_argument("--freeze_at_end",    action="store_true")
     args = parser.parse_args()
 
-    device = torch.device(args.device)
+    # 1. Load
+    positions, quats_wxyz, joint_names, src_fps, human_height = load_mhr_npz(
+        mhr_file=args.mhr_file,
+        mhr_root=args.mhr_root,
+        device=args.device,
+        fps=args.fps,
+    )
 
-    # ── 1. Load MHR file and run forward pass ─────────────────────────────────
-    skel_states, motion_fps = load_mhr_file(args.mhr_file, device)
-
-    # ── 2. Optional rotation of all joint positions/orientations ──────────────
+    # 2. Optional global rotation (same as smplx_to_robot.py)
     if args.rotate_roll != 0.0 or args.rotate_yaw != 0.0 or args.rotate_pitch != 0.0:
-        print(f"  Applying rotation: roll={args.rotate_roll}°  yaw={args.rotate_yaw}°  "
-              f"pitch={args.rotate_pitch}°")
-        skel_states = apply_rotation(
-            skel_states, args.rotate_roll, args.rotate_yaw, args.rotate_pitch
+        combined_rot = (
+            R.from_euler("x", args.rotate_roll,  degrees=True) *
+            R.from_euler("z", args.rotate_yaw,   degrees=True) *
+            R.from_euler("y", args.rotate_pitch, degrees=True)
         )
+        T, N_j, _ = positions.shape
+        positions = combined_rot.apply(positions.reshape(-1, 3)).reshape(T, N_j, 3).astype(np.float32)
+        for t in range(T):
+            for j in range(N_j):
+                q = quats_wxyz[t, j]
+                r_orig = R.from_quat([q[1], q[2], q[3], q[0]])
+                quats_wxyz[t, j] = (combined_rot * r_orig).as_quat(scalar_first=True)
 
-    # ── 3. Estimate human height from T-pose ──────────────────────────────────
-    actual_human_height = compute_human_height(skel_states)
-    print(f"  Estimated human height: {actual_human_height:.3f} m")
+    # 3. FPS alignment
+    tgt_fps = 30
+    mhr_frames, aligned_fps = get_mhr_frames(
+        positions, quats_wxyz, joint_names, src_fps, tgt_fps=tgt_fps
+    )
+    print(f"[MHR] {len(mhr_frames)} frames at {aligned_fps:.1f} FPS")
 
-    # ── 4. Pre-build all frame dicts ───────────────────────────────────────────
-    N = skel_states.shape[0]
-    frame_dicts = [build_frame_data(skel_states[i]) for i in range(N)]
-
-    # ── 5. Initialise GMR retargeting system ───────────────────────────────────
+    # 4. GMR
     retarget = GMR(
-        actual_human_height=actual_human_height,
+        actual_human_height=human_height,
         src_human="mhr",
         tgt_robot=args.robot,
         ik_config_path=args.ik_config,
     )
 
-    # ── 6. Optionally open the MuJoCo viewer ───────────────────────────────────
+    # 5. Viewer
     if not args.no_viewer:
         robot_motion_viewer = RobotMotionViewer(
             robot_type=args.robot,
-            motion_fps=motion_fps,
+            motion_fps=aligned_fps,
             transparent_robot=0,
             record_video=args.record_video,
-            video_path=(
-                args.video_path
-                if args.video_path is not None
-                else f"videos/{args.robot}_{pathlib.Path(args.mhr_file).stem}.mp4"
-            ),
+            video_path=(args.video_path if args.video_path is not None
+                        else f"videos/{args.robot}_{os.path.basename(args.mhr_file).split('.')[0]}.mp4"),
             camera_distance=args.camera_distance,
             camera_elevation=args.camera_elevation,
             camera_height=args.camera_height,
@@ -392,25 +268,22 @@ if __name__ == "__main__":
             os.makedirs(save_dir, exist_ok=True)
         qpos_list = []
 
-    # ── 7. Main retargeting loop ────────────────────────────────────────────────
-    i = -1
-    fps_counter = 0
+    fps_counter    = 0
     fps_start_time = time.time()
-    fps_display_interval = 2.0
 
+    # 6. Main loop
+    i = -1
     while True:
         if args.loop:
-            i = (i + 1) % N
+            i = (i + 1) % len(mhr_frames)
         else:
             i += 1
-            if i >= N:
+            if i >= len(mhr_frames):
                 if args.freeze_at_end and not args.no_viewer:
                     print("[freeze_at_end] Holding last frame. Close the window to exit.")
                     while robot_motion_viewer.viewer.is_running():
                         robot_motion_viewer.step(
-                            root_pos=qpos[:3],
-                            root_rot=qpos[3:7],
-                            dof_pos=qpos[7:],
+                            root_pos=qpos[:3], root_rot=qpos[3:7], dof_pos=qpos[7:],
                             human_motion_data=retarget.scaled_human_data,
                             human_pos_offset=np.array([0.0, 0.0, 0.0]),
                             show_human_body_name=False,
@@ -419,24 +292,18 @@ if __name__ == "__main__":
                         )
                 break
 
-        # FPS display
         fps_counter += 1
-        current_time = time.time()
-        if current_time - fps_start_time >= fps_display_interval:
-            actual_fps = fps_counter / (current_time - fps_start_time)
-            print(f"  Rendering FPS: {actual_fps:.2f}")
+        now = time.time()
+        if now - fps_start_time >= 2.0:
+            print(f"Actual rendering FPS: {fps_counter / (now - fps_start_time):.2f}")
             fps_counter = 0
-            fps_start_time = current_time
+            fps_start_time = now
 
-        # Retarget current frame
-        qpos = retarget.retarget(frame_dicts[i])
+        qpos = retarget.retarget(mhr_frames[i])
 
-        # Visualise
         if not args.no_viewer:
             robot_motion_viewer.step(
-                root_pos=qpos[:3],
-                root_rot=qpos[3:7],
-                dof_pos=qpos[7:],
+                root_pos=qpos[:3], root_rot=qpos[3:7], dof_pos=qpos[7:],
                 human_motion_data=retarget.scaled_human_data,
                 human_pos_offset=np.array([0.0, 0.0, 0.0]),
                 show_human_body_name=False,
@@ -447,25 +314,20 @@ if __name__ == "__main__":
         if args.save_path is not None:
             qpos_list.append(qpos)
 
-    # ── 8. Optionally save ─────────────────────────────────────────────────────
+    # 7. Save
     if args.save_path is not None:
         import pickle
-
-        root_pos = np.array([q[:3]          for q in qpos_list])
-        root_rot = np.array([q[3:7][[1,2,3,0]] for q in qpos_list])  # wxyz → xyzw
-        dof_pos  = np.array([q[7:]           for q in qpos_list])
-
         motion_data = {
-            "fps":            motion_fps,
-            "root_pos":       root_pos,
-            "root_rot":       root_rot,
-            "dof_pos":        dof_pos,
+            "fps":            aligned_fps,
+            "root_pos":       np.array([q[:3]             for q in qpos_list]),
+            "root_rot":       np.array([q[3:7][[1,2,3,0]] for q in qpos_list]),
+            "dof_pos":        np.array([q[7:]              for q in qpos_list]),
             "local_body_pos": None,
             "link_body_list": None,
         }
         with open(args.save_path, "wb") as f:
             pickle.dump(motion_data, f)
-        print(f"  Saved to {args.save_path}")
+        print(f"Saved to {args.save_path}")
 
     if not args.no_viewer:
         robot_motion_viewer.close()
