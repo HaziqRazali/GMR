@@ -53,6 +53,25 @@ _HEAD_IDX  = 113
 _LBALL_IDX = 8
 _RBALL_IDX = 24
 
+# Per-joint corrector: R_world_tpose.inv() computed offline (from visualize_mhr_offsets3.py)
+# Applied as:  R_corrected = R_world * R_corrector  (right-multiply, same as offsets3 COL3)
+# These are applied BEFORE the rot_offsets in mhr_to_t1.json, which GMR applies afterwards.
+# WXYZ scalar-first
+_R_CORRECTOR_WXYZ = {
+    "root":     [+0.999682, +0.008607, -0.022852, -0.006274],
+    "l_upleg":  [+0.576042, +0.490021, -0.445904, +0.478774],
+    "r_upleg":  [+0.475742, -0.579886, -0.481732, -0.453141],
+    "l_lowleg": [+0.601068, +0.402296, -0.543664, +0.425799],
+    "r_lowleg": [+0.391426, -0.601407, -0.433425, -0.545196],
+    "l_ball":   [+0.771242, -0.266156, -0.522893, +0.246841],
+    "r_ball":   [-0.129435, -0.704962, -0.228047, -0.658991],
+    "c_spine3": [+0.458588, -0.546636, -0.471312, -0.518413],
+    "l_uparm":  [+0.793685, -0.587507, +0.017141, +0.156863],
+    "r_uparm":  [-0.582795, -0.808512, -0.081599, +0.000291],
+    "l_lowarm": [+0.803007, -0.556798, +0.196657, -0.080508],
+    "r_lowarm": [-0.557896, -0.795043, +0.156783, +0.179103],
+}
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -117,14 +136,26 @@ def load_mhr_npz(mhr_file, mhr_root="~/MHR", device="cpu", batch_size=256, fps=N
 
     # Raw quaternions: xyzw from MHR -> wxyz for GMR
     q_xyzw = skel_state[:, ik_idxs, 3:7]              # (T, N_ik, 4)
-    quats_wxyz = q_xyzw[:, :, [3, 0, 1, 2]]           # (T, N_ik, 4) wxyz
+    quats_wxyz = q_xyzw[:, :, [3, 0, 1, 2]].copy()   # (T, N_ik, 4) wxyz
+
+    # Apply _R_CORRECTOR per joint: R_corrected = R_world * R_corrector
+    # (same right-multiply as visualize_mhr_offsets3.py COL3)
+    # rot_offsets in mhr_to_t1.json are applied afterwards by GMR's offset_human_data()
+    for j, idx in enumerate(_MHR_IK_INDICES):
+        ik_name = _MHR_IK_JOINTS[idx]
+        cq      = _R_CORRECTOR_WXYZ[ik_name]             # WXYZ
+        R_corr  = R.from_quat([cq[1], cq[2], cq[3], cq[0]])  # XYZW for scipy
+        q_tj    = quats_wxyz[:, j, :]                    # (T, 4) WXYZ
+        R_world = R.from_quat(q_tj[:, [1, 2, 3, 0]])    # XYZW for scipy
+        quats_wxyz[:, j, :] = (R_world * R_corr).as_quat(scalar_first=True)
 
     # Positions: cm -> m
     positions = skel_state[:, ik_idxs, :3] / 100.0    # (T, N_ik, 3)
 
-    head_y = tpose_np[_HEAD_IDX,  1] / 100.0
-    foot_y = min(tpose_np[_LBALL_IDX, 1], tpose_np[_RBALL_IDX, 1]) / 100.0
-    human_height = (head_y - foot_y) + 0.15
+    # Height: MHR is Z-up, so use Z axis (index 2)
+    head_z = tpose_np[_HEAD_IDX,  2] / 100.0
+    foot_z = min(tpose_np[_LBALL_IDX, 2], tpose_np[_RBALL_IDX, 2]) / 100.0
+    human_height = (head_z - foot_z) + 0.15
     print(f"  Estimated human height: {human_height:.3f} m")
 
     joint_names = [_MHR_IK_JOINTS[idx] for idx in _MHR_IK_INDICES]
