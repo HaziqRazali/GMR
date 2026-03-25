@@ -10,7 +10,6 @@ from general_motion_retargeting import GeneralMotionRetargeting as GMR
 from general_motion_retargeting import RobotMotionViewer
 from general_motion_retargeting.utils.smpl import load_smplx_file, get_smplx_data_offline_fast
 from general_motion_retargeting.utils.smpl_json import load_smplx_json_file
-from general_motion_retargeting.utils.smpl_pkl import load_smplx_4dhumans_pkl
 
 from rich import print
 
@@ -168,6 +167,7 @@ if __name__ == "__main__":
     
     # Load SMPLX trajectory (support .npz, .json, and .pkl)
     if args.smplx_file.endswith(".pkl"):
+        from general_motion_retargeting.utils.smpl_pkl import load_smplx_4dhumans_pkl
         pkl_fps = args.fps if args.fps is not None else 30
         smplx_data, body_model, smplx_output, actual_human_height = load_smplx_4dhumans_pkl(
             args.smplx_file, SMPLX_FOLDER, fps=pkl_fps

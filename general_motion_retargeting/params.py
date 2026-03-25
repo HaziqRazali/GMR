@@ -33,7 +33,7 @@ IK_CONFIG_DICT = {
         "unitree_g1_with_hands": IK_CONFIG_ROOT / "smplx_to_g1.json",
         "unitree_h1": IK_CONFIG_ROOT / "smplx_to_h1.json",
         "unitree_h1_2": IK_CONFIG_ROOT / "smplx_to_h1_2.json",
-        "booster_t1": IK_CONFIG_ROOT / "smplx_to_t1.json",
+        "booster_t1": IK_CONFIG_ROOT / "smplx_to_t1_joints.json",
         "booster_t1_29dof": IK_CONFIG_ROOT / "smplx_to_t1_29dof.json",
         "stanford_toddy": IK_CONFIG_ROOT / "smplx_to_toddy.json",
         "fourier_n1": IK_CONFIG_ROOT / "smplx_to_n1.json",
