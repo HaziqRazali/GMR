@@ -19,7 +19,6 @@ class GeneralMotionRetargeting:
         damping: float=5e-1, # change from 1e-1 to 1e-2.
         verbose: bool=True,
         use_velocity_limit: bool=False,
-        ik_config_path: str = None,  # override the default IK config lookup
     ) -> None:
 
         # load the robot model
@@ -55,11 +54,10 @@ class GeneralMotionRetargeting:
                 print(f"Motor ID {i}: {motor_name}")
 
         # Load the IK config
-        resolved_ik_config_path = ik_config_path if ik_config_path is not None else IK_CONFIG_DICT[src_human][tgt_robot]
-        with open(resolved_ik_config_path) as f:
+        with open(IK_CONFIG_DICT[src_human][tgt_robot]) as f:
             ik_config = json.load(f)
         if verbose:
-            print("Use IK config: ", resolved_ik_config_path)
+            print("Use IK config: ", IK_CONFIG_DICT[src_human][tgt_robot])
         
         # compute the scale ratio based on given human height and the assumption in the IK config
         if actual_human_height is not None:
@@ -273,9 +271,6 @@ class GeneralMotionRetargeting:
         for body_name in human_data.keys():
             pos, quat = human_data[body_name]
             offset_human_data[body_name] = [pos, quat]
-            # skip joints that have no offset registered (e.g. zero-weight entries)
-            if body_name not in rot_offsets:
-                continue
             # apply rotation offset first
             updated_quat = (R.from_quat(quat, scalar_first=True) * rot_offsets[body_name]).as_quat(scalar_first=True)
             offset_human_data[body_name][1] = updated_quat

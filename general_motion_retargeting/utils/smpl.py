@@ -1,3 +1,4 @@
+import json
 import numpy as np
 import smplx
 import torch
@@ -11,16 +12,160 @@ def load_smpl_file(smpl_file):
     smpl_data = np.load(smpl_file, allow_pickle=True)
     return smpl_data
 
+def _rotmat_to_rotvec(x):
+    """Convert rotation matrices (..., J, 3, 3) to axis-angle (..., J*3)."""
+    x = np.array(x, dtype=np.float64)
+    N, J = x.shape[:2]
+    return R.from_matrix(x.reshape(-1, 3, 3)).as_rotvec().reshape(N, J * 3).astype(np.float32)
+
+
+def _rot6d_to_rotmat(d):
+    """Convert 6D rotation representation to rotation matrices.
+
+    Args:
+        d: np.ndarray of shape (..., 6). First 3 values are col-0, next 3 are col-1.
+
+    Returns:
+        np.ndarray of shape (..., 3, 3).
+    """
+    orig_shape = d.shape[:-1]
+    d = d.reshape(-1, 6).copy()
+    # Replace all-zero rows with identity 6D
+    zero_rows = np.all(d == 0, axis=-1)
+    d[zero_rows] = np.array([1., 0., 0., 0., 1., 0.], dtype=d.dtype)
+    a1 = d[:, :3]
+    a2 = d[:, 3:]
+    b1 = a1 / (np.linalg.norm(a1, axis=-1, keepdims=True) + 1e-8)
+    b2 = a2 - np.sum(a2 * b1, axis=-1, keepdims=True) * b1
+    b2 = b2 / (np.linalg.norm(b2, axis=-1, keepdims=True) + 1e-8)
+    b3 = np.cross(b1, b2)
+    mat = np.stack([b1, b2, b3], axis=-1)  # (M, 3, 3), columns
+    return mat.reshape(*orig_shape, 3, 3)
+
+
+def _load_synthium_json(synthium_file, smplx_body_model_path):
+    """Load a Synthium inference output JSON (per-frame pred_body_params in 6D rotation).
+
+    Each frame has ``pred_body_params`` of shape (22, 6):
+      - row 0  : global_orient
+      - rows 1-21: body_pose (21 SMPL-X body joints)
+    """
+    with open(synthium_file) as f:
+        raw = json.load(f)
+
+    fps = float(raw.get("fps", 30.0))
+    frames = raw["frames"]
+    N = len(frames)
+
+    _identity_6d = np.array([1., 0., 0., 0., 1., 0.], dtype=np.float32)
+    all_params = np.tile(_identity_6d, (N, 22, 1))  # (N, 22, 6)
+    last_valid = np.tile(_identity_6d, (22, 1))  # (22, 6)
+    for i, frame in enumerate(frames):
+        if frame.get("detected", True) and frame.get("pred_body_params") is not None:
+            params = np.array(frame["pred_body_params"], dtype=np.float32)
+            if params.shape == (22, 6):
+                last_valid = params
+        all_params[i] = last_valid
+
+    # global_orient: (N, 1, 6) -> rotmat (N, 1, 3, 3) -> axis-angle (N, 3)
+    go_mat = _rot6d_to_rotmat(all_params[:, 0:1, :])   # (N, 1, 3, 3)
+    global_orient_aa = _rotmat_to_rotvec(go_mat)        # (N, 3)
+
+    # body_pose: (N, 21, 6) -> rotmat (N, 21, 3, 3) -> axis-angle (N, 63)
+    bp_mat = _rot6d_to_rotmat(all_params[:, 1:, :])    # (N, 21, 3, 3)
+    body_pose_aa = _rotmat_to_rotvec(bp_mat)            # (N, 63)
+
+    transl = np.zeros((N, 3), dtype=np.float32)
+    betas = np.zeros(16, dtype=np.float32)
+
+    smplx_data = {
+        "pose_body":        body_pose_aa,
+        "root_orient":      global_orient_aa,
+        "trans":            transl,
+        "betas":            betas,
+        "gender":           "neutral",
+        "mocap_frame_rate": np.array(fps),
+    }
+
+    body_model = smplx.create(smplx_body_model_path, "smplx", gender="neutral", use_pca=False)
+
+    smplx_output = body_model(
+        betas=torch.tensor(betas).float().view(1, -1),
+        global_orient=torch.tensor(global_orient_aa).float(),
+        body_pose=torch.tensor(body_pose_aa).float(),
+        transl=torch.tensor(transl).float(),
+        left_hand_pose=torch.zeros(N, 45).float(),
+        right_hand_pose=torch.zeros(N, 45).float(),
+        jaw_pose=torch.zeros(N, 3).float(),
+        leye_pose=torch.zeros(N, 3).float(),
+        reye_pose=torch.zeros(N, 3).float(),
+        return_full_pose=True,
+    )
+
+    human_height = 1.66  # no betas -> assume average height
+    return smplx_data, body_model, smplx_output, human_height
+
+
+def _load_smplx_json(smplx_file, smplx_body_model_path):
+    """Load SMPL-X data from a JSON file (Fit3D format with rotation matrices)."""
+    with open(smplx_file) as f:
+        raw = json.load(f)
+
+    body_pose_aa     = _rotmat_to_rotvec(raw["body_pose"])       # (N, 63)
+    global_orient_aa = _rotmat_to_rotvec(raw["global_orient"])   # (N, 3)
+    left_hand_aa     = _rotmat_to_rotvec(raw["left_hand_pose"])  # (N, 45)
+    right_hand_aa    = _rotmat_to_rotvec(raw["right_hand_pose"]) # (N, 45)
+    jaw_aa           = _rotmat_to_rotvec(raw["jaw_pose"])        # (N, 3)
+    leye_aa          = _rotmat_to_rotvec(raw["leye_pose"])       # (N, 3)
+    reye_aa          = _rotmat_to_rotvec(raw["reye_pose"])       # (N, 3)
+
+    betas  = np.pad(np.array(raw["betas"], dtype=np.float32)[0], (0, 6))  # (10,) -> (16,)
+    transl = np.array(raw["transl"], dtype=np.float32)  # (N, 3)
+    N = transl.shape[0]
+
+    smplx_data = {
+        "pose_body":        body_pose_aa,
+        "root_orient":      global_orient_aa,
+        "trans":            transl,
+        "betas":            betas,
+        "gender":           "neutral",
+        "mocap_frame_rate": np.array(50.0),  # Fit3D is captured at 50 FPS
+    }
+
+    body_model = smplx.create(smplx_body_model_path, "smplx", gender="neutral", use_pca=False)
+
+    smplx_output = body_model(
+        betas=torch.tensor(betas).float().view(1, -1),
+        global_orient=torch.tensor(global_orient_aa).float(),
+        body_pose=torch.tensor(body_pose_aa).float(),
+        transl=torch.tensor(transl).float(),
+        left_hand_pose=torch.tensor(left_hand_aa).float(),
+        right_hand_pose=torch.tensor(right_hand_aa).float(),
+        jaw_pose=torch.tensor(jaw_aa).float(),
+        leye_pose=torch.tensor(leye_aa).float(),
+        reye_pose=torch.tensor(reye_aa).float(),
+        return_full_pose=True,
+    )
+
+    human_height = 1.66 + 0.1 * betas[0]
+    return smplx_data, body_model, smplx_output, human_height
+
+
 def load_smplx_file(smplx_file, smplx_body_model_path):
+    if str(smplx_file).endswith(".json"):
+        with open(smplx_file) as _f:
+            _peek = json.load(_f)
+        # Synthium format: top-level "frames" list with "pred_body_params" (6D rotations)
+        if "frames" in _peek and _peek["frames"] and "pred_body_params" in _peek["frames"][0]:
+            return _load_synthium_json(smplx_file, smplx_body_model_path)
+        # Fit3D / standard format: top-level rotation matrix arrays
+        return _load_smplx_json(smplx_file, smplx_body_model_path)
     smplx_data = np.load(smplx_file, allow_pickle=True)
-    # Infer num_betas from saved data so the model's shapedirs size matches
-    num_betas = int(np.array(smplx_data["betas"]).reshape(-1).shape[0])
     body_model = smplx.create(
         smplx_body_model_path,
         "smplx",
         gender=str(smplx_data["gender"]),
         use_pca=False,
-        num_betas=num_betas,
     )
     # print(smplx_data["pose_body"].shape)
     # print(smplx_data["betas"].shape)
@@ -28,24 +173,17 @@ def load_smplx_file(smplx_file, smplx_body_model_path):
     # print(smplx_data["trans"].shape)
     
     num_frames = smplx_data["pose_body"].shape[0]
-    # Use saved hand poses if available (e.g. from MHR conversion), else zero
-    if "left_hand_pose" in smplx_data.files:
-        lhand = torch.tensor(smplx_data["left_hand_pose"]).float().expand(num_frames, -1)
-        rhand = torch.tensor(smplx_data["right_hand_pose"]).float().expand(num_frames, -1)
-    else:
-        lhand = torch.zeros(num_frames, 45).float()
-        rhand = torch.zeros(num_frames, 45).float()
     smplx_output = body_model(
-        betas=torch.tensor(smplx_data["betas"]).float().view(1, -1), # (1, num_betas)
+        betas=torch.tensor(smplx_data["betas"]).float().view(1, -1), # (16,)
         global_orient=torch.tensor(smplx_data["root_orient"]).float(), # (N, 3)
         body_pose=torch.tensor(smplx_data["pose_body"]).float(), # (N, 63)
         transl=torch.tensor(smplx_data["trans"]).float(), # (N, 3)
-        left_hand_pose=lhand,
-        right_hand_pose=rhand,
+        left_hand_pose=torch.zeros(num_frames, 45).float(),
+        right_hand_pose=torch.zeros(num_frames, 45).float(),
         jaw_pose=torch.zeros(num_frames, 3).float(),
         leye_pose=torch.zeros(num_frames, 3).float(),
         reye_pose=torch.zeros(num_frames, 3).float(),
-        expression=torch.zeros(num_frames, 10).float(),
+        # expression=torch.zeros(num_frames, 10).float(),
         return_full_pose=True,
     )
     
@@ -189,9 +327,9 @@ def get_smplx_data_offline_fast(smplx_data, body_model, smplx_output, tgt_fps=30
     src_fps = smplx_data["mocap_frame_rate"].item()
     frame_skip = int(src_fps / tgt_fps)
     num_frames = smplx_data["pose_body"].shape[0]
-    global_orient = smplx_output.global_orient.detach().numpy().reshape(num_frames, 3)
+    global_orient = smplx_output.global_orient.squeeze()
     full_body_pose = smplx_output.full_pose.reshape(num_frames, -1, 3)
-    joints = smplx_output.joints.detach().numpy().reshape(num_frames, -1, 3)
+    joints = smplx_output.joints.detach().numpy().squeeze()
     joint_names = JOINT_NAMES[: len(body_model.parents)]
     parents = body_model.parents
     
@@ -282,9 +420,9 @@ def get_gvhmr_data_offline_fast(smplx_data, body_model, smplx_output, tgt_fps=30
     src_fps = smplx_data["mocap_frame_rate"].item()
     frame_skip = int(src_fps / tgt_fps)
     num_frames = smplx_data["pose_body"].shape[0]
-    global_orient = smplx_output.global_orient.detach().numpy().reshape(num_frames, 3)
+    global_orient = smplx_output.global_orient.squeeze()
     full_body_pose = smplx_output.full_pose.reshape(num_frames, -1, 3)
-    joints = smplx_output.joints.detach().numpy().reshape(num_frames, -1, 3)
+    joints = smplx_output.joints.detach().numpy().squeeze()
     joint_names = JOINT_NAMES[: len(body_model.parents)]
     parents = body_model.parents
     
