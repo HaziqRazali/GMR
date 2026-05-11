@@ -11,6 +11,15 @@ setup(
   url="https://github.com/YanjieZe/GMR",
   license="MIT",
   version="0.2.0",
+  
+  include_package_data=True,
+  package_data={
+        "general_motion_retargeting": [
+            "assets/**/*",
+            "ik_configs/**/*",
+        ],
+    },
+
   install_requires=[
     "loop_rate_limiters",
     "mink",
@@ -29,4 +38,5 @@ setup(
     "imageio[ffmpeg]",
   ],
   python_requires='>=3.10',
+
 )

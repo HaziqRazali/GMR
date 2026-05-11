@@ -2,7 +2,7 @@ import pathlib
 
 HERE = pathlib.Path(__file__).parent
 IK_CONFIG_ROOT = HERE / "ik_configs"
-ASSET_ROOT = HERE / ".." / "assets"
+ASSET_ROOT = HERE / "assets"
 
 ROBOT_XML_DICT = {
     "unitree_g1": ASSET_ROOT / "unitree_g1" / "g1_mocap_29dof.xml",
